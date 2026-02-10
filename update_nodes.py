@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import re
+import sys # 引入 sys 模块用于控制退出状态
 
 def fetch_wuxie_nodes():
     url = "https://tcping.wuxie.de/"
@@ -11,30 +12,28 @@ def fetch_wuxie_nodes():
 
     try:
         response = requests.get(url, headers=headers, timeout=20)
+        
+        # 如果状态码不是 200 (例如 404, 500)，直接抛出异常
+        response.raise_for_status() 
+        
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         
         nodes = []
-        
-        # 预定义省份列表
         known_provinces = ["北京", "上海", "天津", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东", "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海", "内蒙古", "广西", "西藏", "宁夏", "新疆", "香港", "澳门", "台湾"]
 
-        # 查找页面上所有的表格
         tables = soup.find_all('table')
 
         for table in tables:
-            # --- 1. 确定省份 (向上回溯) ---
+            # --- 1. 省份回溯 ---
             current_province = "未知"
-            # 限制回溯步数
             prev_generator = table.previous_elements
             steps = 0
             for elem in prev_generator:
-                if steps > 100: break #稍微增加回溯深度以防IPv6表格离标题太远
+                if steps > 100: break 
                 steps += 1
                 if not elem.name: continue 
                 text = elem.get_text(strip=True)
-                
-                # 找到省份就停止
                 found = False
                 for p in known_provinces:
                     if p in text:
@@ -45,43 +44,29 @@ def fetch_wuxie_nodes():
             
             if current_province == "未知": continue
 
-            # --- 2. 确定列映射 (ISP Map) ---
+            # --- 2. 列映射 ---
             rows = table.find_all('tr')
-            col_map = {} # { index: 'ISP_CODE' }
-            
-            # 先扫描表头行
+            col_map = {} 
             for row in rows:
                 cols = row.find_all(['td', 'th'])
                 col_texts = [c.get_text(strip=True) for c in cols]
                 full_row_text = "".join(col_texts)
-                
                 if any(k in full_row_text for k in ["移动", "联通", "电信"]):
                     for idx, text in enumerate(col_texts):
-                        if "移动" in text or "CM" in text.upper():
-                            col_map[idx] = "CM"
-                        elif "联通" in text or "CU" in text.upper():
-                            col_map[idx] = "CU"
-                        elif "电信" in text or "CT" in text.upper():
-                            col_map[idx] = "CT"
-                    break # 找到表头后停止扫描表头
+                        if "移动" in text or "CM" in text.upper(): col_map[idx] = "CM"
+                        elif "联通" in text or "CU" in text.upper(): col_map[idx] = "CU"
+                        elif "电信" in text or "CT" in text.upper(): col_map[idx] = "CT"
+                    break 
 
-            # --- 3. 提取数据 (IPv4 和 IPv6) ---
+            # --- 3. 数据提取 ---
             for row in rows:
                 cols = row.find_all(['td', 'th'])
                 col_texts = [c.get_text(strip=True) for c in cols]
                 
                 for idx, cell_text in enumerate(col_texts):
-                    # 只处理即使 ISP 列
                     if idx in col_map:
                         isp_code = col_map[idx]
-                        
-                        # A. 尝试匹配 IPv4
-                        # 正则：数字.数字.数字.数字
                         v4_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', cell_text)
-                        
-                        # B. 尝试匹配 IPv6
-                        # 正则：包含冒号的十六进制串 (简化版，防止误伤时间等，需配合长度判断)
-                        # 这是一个比较通用的抓取 IPv6 的正则
                         v6_match = re.search(r'([a-fA-F0-9]{1,4}:[:a-fA-F0-9]+)', cell_text)
                         
                         ip = None
@@ -90,52 +75,48 @@ def fetch_wuxie_nodes():
                         if v4_match:
                             ip = v4_match.group(1)
                             ip_type = "IPv4"
-                            # 过滤内网 IP
                             if ip.startswith("127.") or ip.startswith("192.168"): continue
-
                         elif v6_match and ":" in cell_text:
-                            # 二次确认 IPv6 格式 (至少有2个冒号)
                             candidate = v6_match.group(1)
                             if candidate.count(':') >= 2:
                                 ip = candidate
                                 ip_type = "IPv6"
 
-                        # 如果提取到了 IP，保存
                         if ip:
                             isp_name_map = {"CT": "电信", "CU": "联通", "CM": "移动"}
-                            
                             node_entry = {
                                 "province": current_province,
                                 "isp": isp_name_map.get(isp_code, "未知"),
                                 "ip": ip,
                                 "type": ip_type
                             }
-                            
-                            # 查重 (避免重复添加)
                             if not any(n['ip'] == ip for n in nodes):
                                 nodes.append(node_entry)
-
         return nodes
 
     except Exception as e:
         print(f"Error fetching data: {e}")
-        return []
+        return [] # 返回空列表
 
 if __name__ == "__main__":
-    print("正在全量抓取 (IPv4 + IPv6) ...")
+    print("开始抓取...")
     data = fetch_wuxie_nodes()
     
-    if data:
-        print(f"抓取成功！共找到 {len(data)} 个节点。")
-        # 统计一下 IPv4 和 IPv6 的数量
-        v4_count = sum(1 for x in data if x['type'] == 'IPv4')
-        v6_count = sum(1 for x in data if x['type'] == 'IPv6')
-        print(f"IPv4: {v4_count} 个, IPv6: {v6_count} 个")
-        
-        # 打印示例
-        print("示例数据:", json.dumps(data[:3], ensure_ascii=False, indent=2))
-        
+    # === 安全检查 ===
+    # 设定一个最小阈值，比如 10 个节点。
+    # 如果抓取到的节点少于 10 个，说明网站可能挂了，或者改版了导致解析失败。
+    MIN_NODES_THRESHOLD = 10 
+    
+    if data and len(data) >= MIN_NODES_THRESHOLD:
+        print(f"数据校验通过！抓取到 {len(data)} 个节点。正在写入文件...")
         with open('nodes.json', 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
+        print("更新成功。")
     else:
-        print("未找到数据。")
+        # === 熔断触发 ===
+        print("【严重警告】抓取失败或数据异常！")
+        print(f"原因：抓取到的节点数量 ({len(data)}) 少于安全阈值 ({MIN_NODES_THRESHOLD})。")
+        print("为了防止覆盖有效数据，本次操作已终止，原 nodes.json 未被修改。")
+        
+        # 抛出非 0 退出码，告诉 GitHub Action 这一步出错了
+        sys.exit(1)
